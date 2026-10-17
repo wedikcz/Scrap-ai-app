@@ -1,0 +1,6 @@
+{
+  "name": "ScrapMaster AI",
+  "description": "Android 15 aarch64 E-waste salvage, LiteLLM Gateway All-in-One, Self-Healing Engine, AI component scanner, pinouts & EDC matrix.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
