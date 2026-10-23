@@ -1,21 +1,25 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ScrapMaster AI — R8 rules for release builds.
+# Room, Moshi (codegen), OkHttp/Retrofit and Coroutines ship consumer rules, but
+# reflection-touched code below needs explicit keep rules to survive R8.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# --- Keep app data models parsed via Moshi codegen (field names are JSON wire names) ---
+-keep class com.example.data.model.** { <init>(...); <fields>; }
+-keep class com.example.data.model.** { <fields>; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# --- Keep Moshi generated adapters lookup (ClassJsonAdapter via reflection fallback) ---
+-keep class **JsonAdapter { <init>(...); }
+-keepnames class kotlin.Metadata { *; }
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# --- Coroutines: debug metadata + internals used reflectively ---
+-keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
+-dontwarn kotlinx.coroutines.**
+
+# --- OkHttp / Okio platform probes ---
+-dontwarn okhttp3.internal.platform.**
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**
+
+# --- Keep crash-relevant stack traces readable ---
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

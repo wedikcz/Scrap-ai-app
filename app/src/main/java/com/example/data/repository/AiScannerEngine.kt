@@ -108,7 +108,7 @@ class AiScannerEngine(
         }
 
         val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey")
             .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
 

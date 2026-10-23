@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Speed
+import java.util.Locale
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
@@ -183,7 +184,7 @@ fun DashboardScreen(
                 )
                 MetricCard(
                     title = "ODHADOVANÁ HODNOTA",
-                    value = "$${String.format("%.1f", totalValue)}",
+                    value = "$${String.format(Locale.US, "%.1f", totalValue)}",
                     subtitle = "Tržní hodnota z e-waste",
                     color = NeonEmerald,
                     modifier = Modifier.weight(1f)

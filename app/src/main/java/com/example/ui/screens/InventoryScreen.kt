@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
+import java.util.Locale
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -289,7 +290,7 @@ private fun InventoryItemRow(
                         StatusBadge(text = "NÍZKÝ STAV", color = NeonRose)
                         Spacer(modifier = Modifier.width(6.dp))
                     }
-                    StatusBadge(text = "$${String.format("%.2f", item.estimatedValueUsd)}", color = NeonEmerald)
+                    StatusBadge(text = "$${String.format(Locale.US, "%.2f", item.estimatedValueUsd)}", color = NeonEmerald)
                 }
             }
 

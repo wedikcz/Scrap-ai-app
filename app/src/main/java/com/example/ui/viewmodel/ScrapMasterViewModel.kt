@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import java.util.Locale
 import java.util.UUID
 
 class ScrapMasterViewModel(application: Application) : AndroidViewModel(application) {
@@ -371,7 +372,7 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
                 out.add("  Gateway Provider: ${gatewayTelemetry.value.activeProvider.badge}")
                 out.add("  Network Mode: ${networkMode.value.badge}")
                 out.add("  Stock Units: ${items.value.sumOf { it.quantity }} (${items.value.size} distinct SKUs)")
-                out.add("  Estimated Vault: $${String.format("%.2f", items.value.sumOf { it.quantity * it.estimatedValueUsd })} USD")
+                out.add("  Estimated Vault: $${String.format(Locale.US, "%.2f", items.value.sumOf { it.quantity * it.estimatedValueUsd })} USD")
                 out.add("  Kanban Projects: ${projects.value.size}")
                 out.add("  Indexed RAG Documents: ${ragDocs.value.size}")
                 out.add("  Repurpose Matrix: 35/35 Nodes Operational")
