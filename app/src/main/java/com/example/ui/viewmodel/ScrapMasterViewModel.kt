@@ -1,6 +1,7 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.gateway.LiteLlmGateway
@@ -17,6 +18,8 @@ import com.example.data.model.SalvageProject
 import com.example.data.model.SelfHealingTraceLog
 import com.example.data.model.SystemErrorLog
 import com.example.data.repository.AiScannerEngine
+import com.example.data.repository.PinoutImportIssue
+import com.example.data.repository.PinoutImportReport
 import com.example.data.repository.RagEngine
 import com.example.data.repository.RagSearchResult
 import com.example.data.repository.ScrapMasterRepository
@@ -37,6 +40,7 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
     private val scannerEngine = AiScannerEngine()
     private val liteLlmGateway = LiteLlmGateway()
     private val ragEngine = RagEngine()
+    private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     init {
         val db = ScrapMasterDatabase.getDatabase(application, viewModelScope)
@@ -142,6 +146,18 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
     )
     val terminalInput = MutableStateFlow("")
 
+    // Pinout JSON schema importer state
+    val pinoutImportReport = MutableStateFlow<PinoutImportReport?>(null)
+    val isImportingPinouts = MutableStateFlow(false)
+
+    // Restore persisted UI preferences (declared after the flows they modify).
+    init {
+        isDarkTheme.value = prefs.getBoolean(KEY_DARK_THEME, true)
+        currentLanguage.value = runCatching {
+            AppLanguage.valueOf(prefs.getString(KEY_LANGUAGE, AppLanguage.CZ.name) ?: AppLanguage.CZ.name)
+        }.getOrDefault(AppLanguage.CZ)
+    }
+
     fun setRoute(route: String) {
         currentRoute.value = route
     }
@@ -152,10 +168,57 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
 
     fun toggleDarkTheme() {
         isDarkTheme.value = !isDarkTheme.value
+        prefs.edit().putBoolean(KEY_DARK_THEME, isDarkTheme.value).apply()
     }
 
     fun toggleLanguage() {
         currentLanguage.value = if (currentLanguage.value == AppLanguage.CZ) AppLanguage.EN else AppLanguage.CZ
+        prefs.edit().putString(KEY_LANGUAGE, currentLanguage.value.name).apply()
+    }
+
+    fun importPinoutsSchema(jsonText: String) {
+        if (jsonText.isBlank()) {
+            pinoutImportReport.value = PinoutImportReport(
+                declared = 0,
+                accepted = emptyList(),
+                errors = listOf(PinoutImportIssue("Import dat", "Vstup je prázdný.")),
+                warnings = emptyList()
+            )
+            return
+        }
+        viewModelScope.launch {
+            isImportingPinouts.value = true
+            try {
+                val report = repository.importPinouts(jsonText)
+                pinoutImportReport.value = report
+                selfHealingToast.value = if (currentLanguage.value == AppLanguage.CZ) {
+                    "Pinout import: ${report.accepted.size} přijato, ${report.rejectedCount} odmítnuto."
+                } else {
+                    "Pinout import: ${report.accepted.size} accepted, ${report.rejectedCount} rejected."
+                }
+                if (report.errors.isNotEmpty()) {
+                    repository.logError(
+                        "PINOUT_IMPORT_REJECTED",
+                        report.errors.joinToString("; ") { "${it.componentRef}: ${it.message}" }.take(500),
+                        "PinoutImporter"
+                    )
+                }
+            } catch (e: Exception) {
+                pinoutImportReport.value = PinoutImportReport(
+                    declared = 0,
+                    accepted = emptyList(),
+                    errors = listOf(PinoutImportIssue("Import dat", e.localizedMessage ?: "Neznámá chyba importu")),
+                    warnings = emptyList()
+                )
+                repository.logError("PINOUT_IMPORT_ERROR", e.localizedMessage ?: "Import failed", "PinoutImporter")
+            } finally {
+                isImportingPinouts.value = false
+            }
+        }
+    }
+
+    fun clearPinoutImportReport() {
+        pinoutImportReport.value = null
     }
 
     fun updatePinoutDatasheet(id: String, url: String, note: String = "Datasheet URL revised") {
@@ -441,6 +504,7 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
                 viewModelScope.launch {
                     val result = ragEngine.queryLocalRag(query, ragDocs.value)
                     out.add(result.answer)
+                    out.add(result.swarm.consensus)
                     if (result.hasCitations) {
                         out.add("CITATIONS: ${result.citations.joinToString(", ")}")
                     }
@@ -468,5 +532,11 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
 
         terminalOutput.value = out
         terminalInput.value = ""
+    }
+
+    companion object {
+        private const val PREFS_NAME = "scrapmaster_prefs"
+        private const val KEY_DARK_THEME = "dark_theme"
+        private const val KEY_LANGUAGE = "language"
     }
 }

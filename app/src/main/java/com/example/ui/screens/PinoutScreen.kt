@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -84,8 +85,12 @@ fun PinoutScreen(
     val pinouts by viewModel.pinouts.collectAsState()
     val searchQuery by viewModel.pinoutSearch.collectAsState()
 
+    val importReport by viewModel.pinoutImportReport.collectAsState()
+    val isImporting by viewModel.isImportingPinouts.collectAsState()
+
     var selectedPinoutId by remember { mutableStateOf<String?>(null) }
     var showEditUrlDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
     var copiedNotice by remember { mutableStateOf<String?>(null) }
 
     val activeItem = pinouts.find { it.id == selectedPinoutId } ?: pinouts.firstOrNull()
@@ -99,6 +104,44 @@ fun PinoutScreen(
     ) {
         item {
             Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "PINOUT KATALOG",
+                        color = TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "${pinouts.size} čipů v lokální DB · JSON schéma import",
+                        color = TextMuted,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                Button(
+                    onClick = {
+                        viewModel.clearPinoutImportReport()
+                        showImportDialog = true
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkCard, contentColor = NeonCyan),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.5f)),
+                    modifier = Modifier.testTag("open_pinout_import_btn")
+                ) {
+                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Import JSON", fontSize = 11.sp)
+                }
+            }
+        }
+
+        item {
             // Search field
             OutlinedTextField(
                 value = searchQuery,
@@ -185,6 +228,15 @@ fun PinoutScreen(
         item {
             Spacer(modifier = Modifier.height(90.dp))
         }
+    }
+
+    if (showImportDialog) {
+        PinoutImportDialog(
+            report = importReport,
+            isImporting = isImporting,
+            onDismiss = { showImportDialog = false },
+            onImport = { json -> viewModel.importPinoutsSchema(json) }
+        )
     }
 
     if (showEditUrlDialog && activeItem != null) {

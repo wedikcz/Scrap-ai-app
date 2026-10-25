@@ -59,6 +59,7 @@ import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.NeonAmber
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonEmerald
+import com.example.ui.theme.NeonRose
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -320,7 +321,95 @@ fun AssistantRagScreen(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(12.dp))
+                    // Smart-Mixture-of-Hackers: four grounded expert perspectives
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "SMART-MIXTURE-OF-HACKERS",
+                            color = NeonCyan,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = "${res.swarm.expertsWithEvidence}/4 S DŮKAZEM",
+                            color = if (res.swarm.isGrounded) NeonEmerald else NeonRose,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                     Spacer(modifier = Modifier.height(6.dp))
+
+                    res.swarm.perspectives.forEach { perspective ->
+                        val accent = if (perspective.hasEvidence) NeonEmerald else NeonRose
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(DarkSurface)
+                                .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                                .padding(8.dp)
+                        ) {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = perspective.expert.label,
+                                        color = accent,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    Text(
+                                        text = "${perspective.confidence}%",
+                                        color = accent,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                                Text(
+                                    text = perspective.expert.roleCz,
+                                    color = TextMuted,
+                                    fontSize = 9.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = perspective.verdict,
+                                    color = TextSecondary,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp
+                                )
+                                perspective.citations.forEach { cit ->
+                                    Text(
+                                        text = cit,
+                                        color = NeonEmerald,
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = res.swarm.consensus,
+                        color = NeonAmber,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 14.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = res.hackerCoreTrace,
                         color = TextMuted,

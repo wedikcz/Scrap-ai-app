@@ -9,10 +9,11 @@ data class RagSearchResult(
     val citations: List<String>,
     val matchedSources: List<Pair<String, String>>, // Doc title, chunk excerpt
     val hackerCoreTrace: String,
-    val hasCitations: Boolean = true
+    val hasCitations: Boolean = true,
+    val swarm: SwarmVerdict
 )
 
-class RagEngine {
+class RagEngine(private val swarmEngine: HackerSwarmEngine = HackerSwarmEngine()) {
 
     suspend fun queryLocalRag(
         query: String,
@@ -21,17 +22,17 @@ class RagEngine {
         val qTokens = query.lowercase().split(Regex("[\\s,;:.?!]+")).filter { it.length > 2 }
 
         // Chunk documents into logical sections
-        val chunks = mutableListOf<ChunkItem>()
+        val chunks = mutableListOf<EvidenceChunk>()
         documents.forEach { doc ->
             val paragraphs = doc.content.split(Regex("\n\n+"))
             paragraphs.forEachIndexed { pIndex, para ->
                 if (para.isNotBlank()) {
                     chunks.add(
-                        ChunkItem(
+                        EvidenceChunk(
                             docTitle = doc.title,
                             partIndex = pIndex + 1,
-                            sourceName = doc.sourceName,
-                            text = para.trim()
+                            text = para.trim(),
+                            sourceName = doc.sourceName
                         )
                     )
                 }
@@ -66,7 +67,8 @@ class RagEngine {
                 4. Action: Add matching PDF/TXT datasheet to vault.
                 </HACKER-CORE>
                 """.trimIndent(),
-                hasCitations = false
+                hasCitations = false,
+                swarm = swarmEngine.analyze(query, emptyList())
             )
         }
 
@@ -81,12 +83,15 @@ class RagEngine {
             answerBuilder.append("• ${chunk.text}\n  ${citations.first { it.contains(chunk.docTitle) }}\n\n")
         }
 
+        val swarm = swarmEngine.analyze(query, topChunks)
+
         val hackerCoreTrace = """
         <HACKER-CORE>
         1. Multidisciplinary query parse: [${qTokens.joinToString(", ")}]
         2. RAG Index matches: ${topChunks.size} chunks retrieved from local storage.
-        3. Self-Critique & Anti-Hallucination: All assertions verified against physical datasheet citations.
-        4. Verified Citations: ${citations.joinToString("; ")}
+        3. Smart-Mixture-of-Hackers: ${swarm.expertsWithEvidence}/${swarm.perspectives.size} expert perspectives grounded (agreement ${(swarm.agreementRatio * 100).toInt()}%).
+        4. Self-Critique & Anti-Hallucination: All assertions verified against physical datasheet citations.
+        5. Verified Citations: ${citations.joinToString("; ")}
         </HACKER-CORE>
         """.trimIndent()
 
@@ -95,14 +100,8 @@ class RagEngine {
             citations = citations,
             matchedSources = sources,
             hackerCoreTrace = hackerCoreTrace,
-            hasCitations = true
+            hasCitations = true,
+            swarm = swarm
         )
     }
-
-    private data class ChunkItem(
-        val docTitle: String,
-        val partIndex: Int,
-        val sourceName: String,
-        val text: String
-    )
 }

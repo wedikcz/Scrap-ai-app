@@ -30,6 +30,18 @@ class ScrapMasterRepository(
     suspend fun updatePinoutDatasheet(id: String, url: String, note: String = "Datasheet link revised") =
         dao.updatePinoutDatasheetUrl(id = id, url = url, note = note)
 
+    /**
+     * Validates a user supplied JSON schema and persists only the components
+     * that passed every check. Rejected rows are returned with their reason.
+     */
+    suspend fun importPinouts(json: String): PinoutImportReport {
+        val report = PinoutJsonImporter.parse(json)
+        if (report.accepted.isNotEmpty()) {
+            dao.insertPinouts(report.accepted)
+        }
+        return report
+    }
+
     suspend fun addItem(item: SalvageItem): Long = dao.insertSalvageItem(item)
 
     suspend fun updateItem(item: SalvageItem) = dao.updateSalvageItem(item)
