@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import com.example.data.model.AiChatMessage
 import com.example.data.model.PinoutItem
 import com.example.data.model.RagDocument
 import com.example.data.model.SalvageItem
@@ -87,6 +88,22 @@ interface ScrapMasterDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRagDocuments(docs: List<RagDocument>)
+
+    // Hermes persistent assistant memory (session scoped, sliding context window)
+    @Query("SELECT * FROM ai_chat_messages WHERE sessionId = :sessionId ORDER BY id DESC LIMIT :limit")
+    suspend fun getRecentChatMessages(sessionId: String, limit: Int): List<AiChatMessage>
+
+    @Query("SELECT * FROM ai_chat_messages WHERE sessionId = :sessionId ORDER BY id ASC")
+    fun observeChatMessages(sessionId: String): Flow<List<AiChatMessage>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertChatMessage(message: AiChatMessage): Long
+
+    @Query("DELETE FROM ai_chat_messages WHERE sessionId = :sessionId")
+    suspend fun clearChatSession(sessionId: String)
+
+    @Query("DELETE FROM ai_chat_messages WHERE sessionId = :sessionId AND id NOT IN (SELECT id FROM ai_chat_messages WHERE sessionId = :sessionId ORDER BY id DESC LIMIT :keep)")
+    suspend fun pruneChatSession(sessionId: String, keep: Int)
 
     // System Error Logs (Convex errorLogs equivalent)
     @Query("SELECT * FROM system_error_logs ORDER BY timestamp DESC LIMIT 50")

@@ -85,11 +85,7 @@ fun HackerCoreBlock(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (analysis.isDemoFallback) {
-                    StatusBadge(text = "LOCAL EDGE FALLBACK", color = NeonAmber)
-                } else {
-                    StatusBadge(text = "DUAL-PASS GEMINI", color = NeonCyan)
-                }
+                StatusBadge(text = analysis.gatewayProviderUsed.badge, color = NeonCyan)
                 Spacer(modifier = Modifier.size(6.dp))
                 Icon(
                     imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,

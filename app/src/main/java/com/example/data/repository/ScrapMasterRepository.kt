@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import com.example.data.local.ScrapMasterDao
 import com.example.data.local.SeedData
+import com.example.data.model.AiChatMessage
 import com.example.data.model.PinoutItem
 import com.example.data.model.RagDocument
 import com.example.data.model.RepurposeMatrixItem
@@ -57,6 +58,10 @@ class ScrapMasterRepository(
     suspend fun deleteProject(id: Long) = dao.deleteProject(id)
 
     suspend fun addRagDocument(doc: RagDocument): Long = dao.insertRagDocument(doc)
+
+    fun chatMessages(sessionId: String): Flow<List<AiChatMessage>> = dao.observeChatMessages(sessionId)
+
+    suspend fun clearChatSession(sessionId: String) = dao.clearChatSession(sessionId)
 
     suspend fun logError(code: String, message: String, component: String) =
         dao.insertErrorLog(SystemErrorLog(errorCode = code, message = message, component = component))

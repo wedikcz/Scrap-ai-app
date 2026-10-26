@@ -74,6 +74,8 @@ fun AssistantRagScreen(
     val isSearching by viewModel.isRagSearching.collectAsState()
     val currentResult by viewModel.ragResult.collectAsState()
     val history by viewModel.chatHistory.collectAsState()
+    val aiSettings by viewModel.aiSettings.collectAsState()
+    val memory by viewModel.assistantMemory.collectAsState()
 
     var queryText by remember { mutableStateOf("") }
     var showAddDocDialog by remember { mutableStateOf(false) }
@@ -116,7 +118,7 @@ fun AssistantRagScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "LOKÁLNÍ OFFLINE RAG ASISTENT",
+                                text = "RAG ASISTENT S OVĚŘENÝMI CITACEMI",
                                 color = TextPrimary,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
@@ -128,11 +130,35 @@ fun AssistantRagScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Klient-side RAG vyhledávání v lokálních datasheetech a bezpečnostních příručkách s povinnými citacemi [zdroj: soubor, část N]. 100% funkční bez internetu.",
+                        text = "RAG vyhledávání v lokálních datasheetech s povinnými citacemi [zdroj: soubor, část N]. S nakonfigurovaným klíčem odpovídá plné AI pouze z těchto důkazů; bez klíče běží deterministická lokální extrakce – nikdy smyšlená odpověď.",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 16.sp
                     )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        StatusBadge(
+                            text = if (aiSettings.isReady) "FULL AI" else "OFFLINE RAG",
+                            color = if (aiSettings.isReady) NeonCyan else NeonAmber
+                        )
+                        Text(
+                            text = "${memory.size} zpráv v paměti",
+                            color = TextMuted,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        TextButton(
+                            onClick = { viewModel.setRoute("/ai") },
+                            modifier = Modifier.testTag("assistant_ai_settings_btn")
+                        ) {
+                            Text("Nastavit AI", color = NeonCyan, fontSize = 11.sp)
+                        }
+                    }
                 }
             }
         }
@@ -276,13 +302,41 @@ fun AssistantRagScreen(
                 border = androidx.compose.foundation.BorderStroke(1.dp, NeonEmerald.copy(alpha = 0.4f))
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        text = "DOTAZ: $q",
-                        color = NeonCyan,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "DOTAZ: $q",
+                            color = NeonCyan,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatusBadge(
+                            text = res.engine.badge,
+                            color = if (res.engine == com.example.data.repository.AnswerEngine.CLOUD_AI) NeonEmerald else NeonAmber
+                        )
+                    }
+                    if (res.aiModel.isNotBlank()) {
+                        Text(
+                            text = res.aiModel,
+                            color = TextMuted,
+                            fontSize = 9.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    if (res.guardNote.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = res.guardNote,
+                            color = NeonAmber,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp
+                        )
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
 
                     Text(

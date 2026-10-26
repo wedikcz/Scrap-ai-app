@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
@@ -61,6 +62,7 @@ import com.example.data.model.GatewayTelemetry
 import com.example.data.model.NetworkMode
 import com.example.ui.components.FloatingGlassDock
 import com.example.ui.components.SelfHealingErrorBoundary
+import com.example.ui.screens.AiSettingsScreen
 import com.example.ui.screens.AssistantRagScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.GatewayTelemetryScreen
@@ -135,6 +137,7 @@ class MainActivity : ComponentActivity() {
                                         viewModel.setNetworkMode(next)
                                     },
                                     onOpenGateway = { viewModel.setRoute("/gateway") },
+                                    onOpenAi = { viewModel.setRoute("/ai") },
                                     onToggleTerminal = { viewModel.toggleTerminalMode() }
                                 )
                             },
@@ -168,6 +171,7 @@ class MainActivity : ComponentActivity() {
                                             "/assistant" -> AssistantRagScreen(viewModel = viewModel)
                                             "/termux" -> TermuxMcpScreen(viewModel = viewModel)
                                             "/gateway" -> GatewayTelemetryScreen(viewModel = viewModel)
+                                            "/ai" -> AiSettingsScreen(viewModel = viewModel)
                                             else -> DashboardScreen(viewModel = viewModel)
                                         }
                                     }
@@ -237,6 +241,7 @@ fun TopCyberBar(
     onToggleDark: () -> Unit,
     onToggleNetMode: () -> Unit,
     onOpenGateway: () -> Unit,
+    onOpenAi: () -> Unit,
     onToggleTerminal: () -> Unit
 ) {
     val containerBg = if (isDarkTheme) DarkSurface else LightCard
@@ -279,7 +284,7 @@ fun TopCyberBar(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "AI v5",
+                            text = "v${BuildConfig.VERSION_NAME}",
                             color = NeonCyan,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
@@ -300,6 +305,23 @@ fun TopCyberBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                // Full-AI configuration (key / provider / models)
+                IconButton(
+                    onClick = onOpenAi,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(NeonCyan.copy(alpha = 0.15f))
+                        .testTag("ai_settings_top_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Nastavení AI",
+                        tint = NeonCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
                 // LiteLLM Gateway Telemetry Button
                 Box(
                     modifier = Modifier

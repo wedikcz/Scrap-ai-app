@@ -4,8 +4,14 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.AiPreset
+import com.example.data.ai.AiProbeResult
+import com.example.data.ai.AiSettings
+import com.example.data.ai.AiSettingsStore
+import com.example.data.ai.HermesMemory
 import com.example.data.gateway.LiteLlmGateway
 import com.example.data.local.ScrapMasterDatabase
+import com.example.data.model.AiChatMessage
 import com.example.data.model.AppLanguage
 import com.example.data.model.GatewayTelemetry
 import com.example.data.model.HackerCoreAnalysis
@@ -17,6 +23,7 @@ import com.example.data.model.SalvageItem
 import com.example.data.model.SalvageProject
 import com.example.data.model.SelfHealingTraceLog
 import com.example.data.model.SystemErrorLog
+import com.example.data.repository.AiAssistantEngine
 import com.example.data.repository.AiScannerEngine
 import com.example.data.repository.PinoutImportIssue
 import com.example.data.repository.PinoutImportReport
@@ -30,6 +37,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.Locale
 import java.util.UUID
@@ -37,14 +45,19 @@ import java.util.UUID
 class ScrapMasterViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: ScrapMasterRepository
+    private val aiSettingsStore = AiSettingsStore(application)
     private val scannerEngine = AiScannerEngine()
-    private val liteLlmGateway = LiteLlmGateway()
+    private val liteLlmGateway = LiteLlmGateway(settingsProvider = { aiSettingsStore.load() })
     private val ragEngine = RagEngine()
+    private val hermesMemory: HermesMemory
+    private val assistantEngine: AiAssistantEngine
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     init {
         val db = ScrapMasterDatabase.getDatabase(application, viewModelScope)
         repository = ScrapMasterRepository(db.scrapMasterDao())
+        hermesMemory = HermesMemory(db.scrapMasterDao())
+        assistantEngine = AiAssistantEngine(liteLlmGateway, hermesMemory, ragEngine)
     }
 
     // Navigation and Language
@@ -150,8 +163,18 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
     val pinoutImportReport = MutableStateFlow<PinoutImportReport?>(null)
     val isImportingPinouts = MutableStateFlow(false)
 
+    // Full-AI configuration + Hermes memory
+    val aiSettings = MutableStateFlow(AiSettings())
+    val isTestingAi = MutableStateFlow(false)
+    val aiProbeResult = MutableStateFlow<AiProbeResult?>(null)
+    lateinit var assistantMemory: StateFlow<List<AiChatMessage>>
+        private set
+
     // Restore persisted UI preferences (declared after the flows they modify).
     init {
+        aiSettings.value = runCatching { aiSettingsStore.load() }.getOrDefault(AiSettings())
+        assistantMemory = repository.chatMessages(HermesMemory.DEFAULT_SESSION)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
         isDarkTheme.value = prefs.getBoolean(KEY_DARK_THEME, true)
         currentLanguage.value = runCatching {
             AppLanguage.valueOf(prefs.getString(KEY_LANGUAGE, AppLanguage.CZ.name) ?: AppLanguage.CZ.name)
@@ -234,15 +257,98 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
         networkMode.value = mode
     }
 
-    fun testGatewayFailover() {
-        liteLlmGateway.triggerTestFailover()
-        selfHealingToast.value = if (currentLanguage.value == AppLanguage.CZ)
-            "AI Gateway: Simulován 429 Rate Limit. Proveden okamžitý failover na lokální DEMO heuristiku."
-        else "AI Gateway: Simulated 429 Rate Limit. Immediate failover to local DEMO heuristic executed."
-    }
-
     fun clearSelfHealingToast() {
         selfHealingToast.value = null
+    }
+
+    /**
+     * Saves the AI configuration. [newKey] is null when the user did not touch the
+     * key field; an empty string explicitly clears the stored key.
+     */
+    fun saveAiSettings(
+        preset: AiPreset,
+        baseUrl: String,
+        visionModel: String,
+        chatModel: String,
+        codeModel: String,
+        newKey: String?
+    ) {
+        viewModelScope.launch {
+            val current = aiSettingsStore.load()
+            val candidate = current.copy(
+                preset = preset,
+                baseUrl = baseUrl.trim(),
+                visionModel = visionModel.trim(),
+                chatModel = chatModel.trim(),
+                codeModel = codeModel.trim()
+            )
+
+            if (candidate.provider == com.example.data.ai.AiProvider.OPENAI_COMPATIBLE &&
+                !AiSettings.isEndpointUsable(candidate.effectiveBaseUrl)
+            ) {
+                aiProbeResult.value = AiProbeResult(
+                    ok = false,
+                    message = "Base URL musí být https:// (výjimka: http://127.0.0.1 pro Ollamu)."
+                )
+                return@launch
+            }
+
+            val saved = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                aiSettingsStore.save(candidate, newKey)
+            }
+            if (!saved) {
+                aiProbeResult.value = AiProbeResult(
+                    ok = false,
+                    message = "Klíč se nepodařilo zašifrovat do Android Keystore. Nastavení nebylo uloženo."
+                )
+                return@launch
+            }
+
+            aiSettings.value = aiSettingsStore.load()
+            aiProbeResult.value = null
+            selfHealingToast.value = if (currentLanguage.value == AppLanguage.CZ)
+                "AI nastavení uloženo: ${aiSettings.value.statusLabel()}"
+            else "AI settings saved: ${aiSettings.value.statusLabel()}"
+        }
+    }
+
+    fun testAiConnection() {
+        if (isTestingAi.value) return
+        viewModelScope.launch {
+            isTestingAi.value = true
+            try {
+                aiSettings.value = aiSettingsStore.load()
+                aiProbeResult.value = liteLlmGateway.probe()
+            } finally {
+                isTestingAi.value = false
+            }
+        }
+    }
+
+    fun clearAiKey() {
+        viewModelScope.launch {
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                aiSettingsStore.clearKey(aiSettings.value.preset)
+            }
+            aiSettings.value = aiSettingsStore.load()
+            aiProbeResult.value = null
+            selfHealingToast.value = if (currentLanguage.value == AppLanguage.CZ)
+                "API klíč byl odstraněn. Stav: ${aiSettings.value.statusLabel()}"
+            else "API key removed. Status: ${aiSettings.value.statusLabel()}"
+        }
+    }
+
+    fun clearAssistantMemory() {
+        viewModelScope.launch {
+            assistantEngine.clearMemory()
+            selfHealingToast.value = if (currentLanguage.value == AppLanguage.CZ)
+                "Paměť asistenta (Hermes) byla vymazána."
+            else "Assistant memory (Hermes) cleared."
+        }
+    }
+
+    fun clearAiProbeResult() {
+        aiProbeResult.value = null
     }
 
     // Optimistic inventory mutation with atomic non-negative guard & rollback
@@ -349,11 +455,24 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             isRagSearching.value = true
             try {
-                val docs = ragDocs.value
-                val result = ragEngine.queryLocalRag(query, docs)
+                val result = assistantEngine.ask(
+                    query = query,
+                    documents = ragDocs.value,
+                    networkMode = networkMode.value
+                )
                 ragResult.value = result
                 chatHistory.value = chatHistory.value + (query to result)
                 ragQuery.value = ""
+                if (result.engine == com.example.data.repository.AnswerEngine.CLOUD_AI) {
+                    aiSettings.value = aiSettingsStore.load()
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                repository.logError("RAG_ASSISTANT_ERROR", e.localizedMessage ?: "Assistant failed", "AiAssistant")
+                selfHealingToast.value = if (currentLanguage.value == AppLanguage.CZ)
+                    "Asistent selhal: ${e.localizedMessage ?: "neznámá chyba"}"
+                else "Assistant failed: ${e.localizedMessage ?: "unknown error"}"
             } finally {
                 isRagSearching.value = false
             }
@@ -392,7 +511,8 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
                 out.add("AVAILABLE HACKER-OPS COMMANDS (v6.0):")
                 out.add("  sys-state         Display telemetry, CPU, memory, database, net mode")
                 out.add("  gateway           Inspect AI Gateway All-in-One routing & token metrics")
-                out.add("  heal-test         Simulate 429 rate limit and test zero-downtime failover")
+                out.add("  ai                Show active AI provider, model, key source and memory size")
+                out.add("  probe             Send a real connectivity request to the configured AI")
                 out.add("  lang [cz|en]      Switch language interface")
                 out.add("  invent, ls        List current salvaged inventory")
                 out.add("  scan [chip]       Run dual-pass component analysis with reflection loop")
@@ -407,11 +527,39 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
             }
             "gateway" -> {
                 val t = gatewayTelemetry.value
+                val settings = aiSettings.value
                 out.add("[AI GATEWAY ALL-IN-ONE STATUS]")
                 out.add("  Active Provider: ${t.activeProvider.label} [${t.activeProvider.badge}]")
+                out.add("  Model: ${t.activeModel.ifBlank { settings.effectiveChatModel }}")
                 out.add("  Total Requests: ${t.totalRequests} | Success: ${t.successfulRequests} | Healed: ${t.healedRequests}")
                 out.add("  Total Tokens: ${t.totalTokens} | Latency: ${t.lastLatencyMs} ms")
                 out.add("  Self-Healing Engine: ${if (t.isAutoHealingActive) "ENGAGED" else "OFF"}")
+                out.add("  AI config: ${settings.statusLabel()}")
+            }
+            "ai" -> {
+                val settings = aiSettings.value
+                out.add("[AI ENGINE — ${settings.statusLabel()}]")
+                out.add("  Preset: ${settings.preset.label} (${settings.provider.name})")
+                out.add("  Endpoint: ${if (settings.provider == com.example.data.ai.AiProvider.GEMINI) "generativelanguage.googleapis.com" else settings.effectiveBaseUrl}")
+                out.add("  Vision: ${settings.effectiveVisionModel}")
+                out.add("  Chat: ${settings.effectiveChatModel}")
+                out.add("  Code: ${settings.effectiveCodeModel}")
+                out.add("  Key: ${settings.maskedKey().ifBlank { "— (žádný klíč)" }} (${settings.keySource.name})")
+                out.add("  Hermes memory: ${hermesMemorySize()} stored messages (10 / 4000 chars per prompt)")
+                out.add("  Configure: GUI -> Gateway -> AI Engine.")
+            }
+            "probe", "ai-test" -> {
+                out.add("[AI CONNECTIVITY PROBE] Odesílám reálný požadavek na nakonfigurovaný model…")
+                terminalOutput.value = out
+                viewModelScope.launch {
+                    val result = liteLlmGateway.probe()
+                    aiProbeResult.value = result
+                    val update = terminalOutput.value.toMutableList()
+                    update.add("  ${if (result.ok) "OK" else "FAIL"}: ${result.message}")
+                    update.add("  Latency: ${result.latencyMs} ms | Model: ${result.model.ifBlank { "—" }}")
+                    terminalOutput.value = update
+                }
+                return
             }
             "lang" -> {
                 if (arg.equals("en", true)) {
@@ -422,17 +570,11 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
                     out.add("Jazyk přepnut na ČEŠTINU.")
                 }
             }
-            "heal-test" -> {
-                testGatewayFailover()
-                out.add("[SELF-HEALING ENGINE ACTIVATED]")
-                out.add("  Simulated 429 Rate Limit injected on Cloud Gateway.")
-                out.add("  Silent failover executed to Local Heuristic Engine (DEMO mode).")
-                out.add("  Active Provider is now: ${gatewayTelemetry.value.activeProvider.badge}.")
-            }
             "sys-state", "status" -> {
                 out.add("[SYS-STATE: SCRAPMASTER OMEGA V6.0]")
                 out.add("  Platform Target: Infinix HOT 50 Pro Plus (ARM64 Android 15)")
                 out.add("  Gateway Provider: ${gatewayTelemetry.value.activeProvider.badge}")
+                out.add("  AI Engine: ${aiSettings.value.statusLabel()}")
                 out.add("  Network Mode: ${networkMode.value.badge}")
                 out.add("  Stock Units: ${items.value.sumOf { it.quantity }} (${items.value.size} distinct SKUs)")
                 out.add("  Estimated Vault: $${String.format(Locale.US, "%.2f", items.value.sumOf { it.quantity * it.estimatedValueUsd })} USD")
@@ -448,19 +590,34 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
                 }
             }
             "scan" -> {
-                val target = if (arg.isNotBlank()) arg else "TP4056"
-                out.add("[SCANNING COMPONENT: $target] AI Gateway Dual-Pass Initiated...")
-                viewModelScope.launch {
-                    val analysis = liteLlmGateway.routeMultimodalAnalysis(target, null, networkMode.value)
-                    currentAnalysis.value = analysis
-                    out.add("<HACKER-CORE>")
-                    out.add("  Provider: ${analysis.gatewayProviderUsed.badge} (${analysis.latencyMs}ms)")
-                    out.add("  Identified: ${analysis.componentName} (${analysis.packageType})")
-                    out.add("  Pass 2 Reflection: ${analysis.reflectionNotes}")
-                    out.add("  Origin: ${analysis.estimatedOrigin}")
-                    out.add("  Top EDC: ${analysis.topEdcMatches.firstOrNull() ?: "N/A"}")
-                    out.add("</HACKER-CORE>")
+                if (arg.isBlank()) {
+                    out.add("Usage: scan [chip marking] – the marking is required, nothing is guessed.")
                     terminalOutput.value = out
+                    terminalInput.value = ""
+                    return
+                }
+                out.add("[SCANNING COMPONENT: $arg] AI Gateway Dual-Pass Initiated...")
+                terminalOutput.value = out
+                viewModelScope.launch {
+                    try {
+                        val analysis = liteLlmGateway.routeMultimodalAnalysis(arg, null, networkMode.value)
+                        currentAnalysis.value = analysis
+                        val update = terminalOutput.value.toMutableList()
+                        update.add("<HACKER-CORE>")
+                        update.add("  Provider: ${analysis.gatewayProviderUsed.badge} (${analysis.latencyMs}ms)")
+                        update.add("  Identified: ${analysis.componentName} (${analysis.packageType})")
+                        update.add("  Pass 2 Reflection: ${analysis.reflectionNotes}")
+                        update.add("  Origin: ${analysis.estimatedOrigin}")
+                        update.add("  Top EDC: ${analysis.topEdcMatches.firstOrNull() ?: "N/A"}")
+                        update.add("</HACKER-CORE>")
+                        terminalOutput.value = update
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        val update = terminalOutput.value.toMutableList()
+                        update.add("[SCAN FAILED] ${e.localizedMessage ?: "AI gateway error"}")
+                        terminalOutput.value = update
+                    }
                 }
                 return
             }
@@ -499,16 +656,33 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
                 out.add("  Query: \"$chip\" filetype:pdf (datasheet | schematic | \"pinout\")")
             }
             "rag" -> {
-                val query = if (arg.isNotBlank()) arg else "TP4056 charging current"
-                out.add("[LOCAL RAG QUERY: $query]")
-                viewModelScope.launch {
-                    val result = ragEngine.queryLocalRag(query, ragDocs.value)
-                    out.add(result.answer)
-                    out.add(result.swarm.consensus)
-                    if (result.hasCitations) {
-                        out.add("CITATIONS: ${result.citations.joinToString(", ")}")
-                    }
+                if (arg.isBlank()) {
+                    out.add("Usage: rag [dotaz] – the question is required.")
                     terminalOutput.value = out
+                    terminalInput.value = ""
+                    return
+                }
+                out.add("[RAG QUERY: $arg]")
+                terminalOutput.value = out
+                viewModelScope.launch {
+                    try {
+                        val result = assistantEngine.ask(arg, ragDocs.value, networkMode.value)
+                        val update = terminalOutput.value.toMutableList()
+                        update.add("[ENGINE: ${result.engine.badge}${if (result.aiModel.isNotBlank()) " · ${result.aiModel}" else ""}]")
+                        update.add(result.answer)
+                        update.add(result.swarm.consensus)
+                        if (result.guardNote.isNotBlank()) update.add("GUARD: ${result.guardNote}")
+                        if (result.hasCitations) {
+                            update.add("CITATIONS: ${result.citations.joinToString(", ")}")
+                        }
+                        terminalOutput.value = update
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        val update = terminalOutput.value.toMutableList()
+                        update.add("[RAG FAILED] ${e.localizedMessage ?: "assistant error"}")
+                        terminalOutput.value = update
+                    }
                 }
                 return
             }
@@ -533,6 +707,8 @@ class ScrapMasterViewModel(application: Application) : AndroidViewModel(applicat
         terminalOutput.value = out
         terminalInput.value = ""
     }
+
+    private fun hermesMemorySize(): Int = assistantMemory.value.size
 
     companion object {
         private const val PREFS_NAME = "scrapmaster_prefs"

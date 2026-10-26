@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.data.model.AiChatMessage
 import com.example.data.model.PinoutItem
 import com.example.data.model.RagDocument
 import com.example.data.model.SalvageItem
@@ -20,9 +22,10 @@ import kotlinx.coroutines.launch
         PinoutItem::class,
         SalvageProject::class,
         RagDocument::class,
+        AiChatMessage::class,
         SystemErrorLog::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class ScrapMasterDatabase : RoomDatabase() {
@@ -31,6 +34,24 @@ abstract class ScrapMasterDatabase : RoomDatabase() {
     abstract fun pinoutDao(): PinoutDao
 
     companion object {
+        /**
+         * Adds the assistant memory table without touching the user's inventory or
+         * Kanban data. A destructive fallback here would wipe a salvage vault on
+         * update, which is unacceptable for a workshop app.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `ai_chat_messages` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`sessionId` TEXT NOT NULL, " +
+                        "`role` TEXT NOT NULL, " +
+                        "`content` TEXT NOT NULL, " +
+                        "`timestamp` INTEGER NOT NULL)"
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: ScrapMasterDatabase? = null
 
@@ -41,6 +62,7 @@ abstract class ScrapMasterDatabase : RoomDatabase() {
                     ScrapMasterDatabase::class.java,
                     "scrapmaster_omega.db"
                 )
+                    .addMigrations(MIGRATION_2_3)
                     .fallbackToDestructiveMigration(true)
                     .addCallback(DatabaseCallback(scope))
                     .build()

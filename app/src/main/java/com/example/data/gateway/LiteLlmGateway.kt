@@ -1,12 +1,24 @@
 package com.example.data.gateway
 
 import android.os.SystemClock
-import com.example.BuildConfig
+import com.example.data.ai.AiChatGateway
+import com.example.data.ai.AiChatReply
+import com.example.data.ai.AiHttpException
+import com.example.data.ai.AiNotConfiguredException
+import com.example.data.ai.AiProbeResult
+import com.example.data.ai.AiProtocolException
+import com.example.data.ai.AiProvider
+import com.example.data.ai.AiSettings
+import com.example.data.ai.AiTask
+import com.example.data.ai.AiWire
+import com.example.data.ai.ModelRouter
+import com.example.data.ai.RetryPolicy
 import com.example.data.model.GatewayTelemetry
 import com.example.data.model.HackerCoreAnalysis
 import com.example.data.model.LiteLlmProvider
 import com.example.data.model.NetworkMode
 import com.example.data.model.SelfHealingTraceLog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,137 +30,415 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
+/**
+ * LiteLLM-style gateway for the app: one entry point, two wire protocols
+ * (Gemini and OpenAI-compatible), per-task model routing, bounded retries and
+ * honest telemetry.
+ *
+ * Full-AI policy: there is no demo answer. Without a usable key the gateway
+ * refuses the scan with [AiNotConfiguredException], and a failed call is
+ * reported as a failure. The only "self-healing" left is real: transport retries
+ * for transient errors and a model-driven repair pass when the JSON contract of
+ * the component analysis is broken.
+ */
 class LiteLlmGateway(
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .build()
-) {
+    private val client: OkHttpClient = defaultClient(),
+    private val settingsProvider: () -> AiSettings = { AiSettings() }
+) : AiChatGateway {
+
     private val _telemetry = MutableStateFlow(GatewayTelemetry())
     val telemetry: StateFlow<GatewayTelemetry> = _telemetry.asStateFlow()
 
-    private val _healingLogs = MutableStateFlow<List<SelfHealingTraceLog>>(
-        listOf(
-            SelfHealingTraceLog(
-                id = UUID.randomUUID().toString(),
-                actionName = "AI Gateway v6.0 All-in-One Init",
-                errorDetails = "ARM64 runtime verified with exponential backoff & dual-pass reflection loop",
-                healingStrategy = "Multi-provider resilience established (Cloud GW + Local Edge Heuristic DEMO)",
-                isResolved = true
-            )
-        )
-    )
+    private val _healingLogs = MutableStateFlow<List<SelfHealingTraceLog>>(emptyList())
     val healingLogs: StateFlow<List<SelfHealingTraceLog>> = _healingLogs.asStateFlow()
 
+    override fun currentSettings(): AiSettings = settingsProvider()
+
+    /**
+     * Component analysis with the dual-pass prompt. Images route to the vision
+     * model, marking-only firmware questions to the code specialist. Every field
+     * comes from the upstream model; missing configuration is an error, not a
+     * reason to replay a hard-coded component sheet.
+     */
     suspend fun routeMultimodalAnalysis(
         queryOrMarking: String,
         base64Image: String? = null,
         networkMode: NetworkMode = NetworkMode.AUTO_HYBRID
     ): HackerCoreAnalysis = withContext(Dispatchers.IO) {
-        val startTime = SystemClock.elapsedRealtime()
-        _telemetry.update { it.copy(totalRequests = it.totalRequests + 1) }
+        val settings = currentSettings()
 
-        val apiKey = try {
-            val field = BuildConfig::class.java.getDeclaredField("GEMINI_API_KEY")
-            field.isAccessible = true
-            (field.get(null) as? String) ?: ""
-        } catch (e: Throwable) {
-            ""
+        if (networkMode == NetworkMode.LOCAL_AIRGAPPED) {
+            throw AiNotConfiguredException(
+                "Skenování součástek vyžaduje cloudové AI. Režim LOCAL_ONLY je určený pro offline RAG asistenta."
+            )
+        }
+        if (!settings.isReady) {
+            throw AiNotConfiguredException(
+                "Plné AI není aktivní: chybí API klíč nebo Base URL. Otevři Nastavení AI a vlož klíč."
+            )
         }
 
-        val cloudAvailable = networkMode != NetworkMode.LOCAL_AIRGAPPED &&
-                apiKey.isNotBlank() &&
-                !apiKey.contains("PLACEHOLDER", ignoreCase = true) &&
-                !apiKey.contains("MY_GEMINI_API_KEY", ignoreCase = true)
+        _telemetry.update { it.copy(totalRequests = it.totalRequests + 1) }
+        val started = SystemClock.elapsedRealtime()
+        val task = ModelRouter.taskFor(queryOrMarking, base64Image != null)
 
-        if (cloudAvailable) {
-            // Exponential backoff retry loop (max 3 attempts)
-            var lastException: Exception? = null
-            for (attempt in 0..2) {
-                try {
-                    val result = callCloudGatewayDualPass(apiKey, queryOrMarking, base64Image)
-                    val latency = SystemClock.elapsedRealtime() - startTime
-                    _telemetry.update {
-                        it.copy(
-                            successfulRequests = it.successfulRequests + 1,
-                            totalTokens = it.totalTokens + 480,
-                            lastLatencyMs = latency,
-                            activeProvider = LiteLlmProvider.CLOUD_GATEWAY
-                        )
-                    }
-                    return@withContext result.copy(
-                        gatewayProviderUsed = LiteLlmProvider.CLOUD_GATEWAY,
-                        latencyMs = latency
-                    )
-                } catch (error: Exception) {
-                    lastException = error
-                    val backoffMs = 800L * (1 shl attempt)
-                    if (attempt < 2) {
-                        delay(backoffMs)
-                    }
-                }
-            }
+        try {
+            val result = callAnalysisWithRepair(settings, task, queryOrMarking, base64Image)
+            val latency = SystemClock.elapsedRealtime() - started
+            val analysis = parseAnalysis(result.json, queryOrMarking, settings, latency, result.totalTokens)
+            recordSuccess(
+                reply = result.reply.copy(latencyMs = latency, totalTokens = result.totalTokens),
+                settings = settings
+            )
+            analysis
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            recordFailure(error)
+            throw IOException(RetryPolicy.userMessage(error), error)
+        }
+    }
 
-            // If retry loop exhausted, perform autonomous self-healing failover
-            val healLog = SelfHealingTraceLog(
-                id = UUID.randomUUID().toString(),
-                actionName = "Cloud Gateway HTTP 429/Timeout Failover",
-                errorDetails = lastException?.localizedMessage ?: "Unknown Gateway exception after 3 retries",
-                healingStrategy = "Self-Healing Engine: Switched gracefully to Local Heuristic Engine (DEMO mode labeled)",
+    override suspend fun chat(
+        systemPrompt: String,
+        userPrompt: String,
+        task: AiTask
+    ): AiChatReply = withContext(Dispatchers.IO) {
+        val settings = currentSettings()
+        if (!settings.isReady) {
+            throw AiNotConfiguredException("AI není nakonfigurováno. Vlož API klíč v Nastavení AI.")
+        }
+        _telemetry.update { it.copy(totalRequests = it.totalRequests + 1) }
+        val started = SystemClock.elapsedRealtime()
+        try {
+            val reply = callWithRetry(
+                settings = settings,
+                task = task,
+                userPrompt = userPrompt,
+                systemPrompt = systemPrompt,
+                imageBase64 = null,
+                jsonMode = false
+            )
+            val measured = reply.copy(latencyMs = SystemClock.elapsedRealtime() - started)
+            recordSuccess(measured, settings)
+            measured
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            recordFailure(error)
+            throw IOException(RetryPolicy.userMessage(error), error)
+        }
+    }
+
+    override suspend fun probe(): AiProbeResult = withContext(Dispatchers.IO) {
+        val settings = currentSettings()
+        if (!settings.isReady) {
+            return@withContext AiProbeResult(
+                ok = false,
+                message = "AI není aktivní: chybí API klíč nebo Base URL. Vlož je v Nastavení AI."
+            )
+        }
+        val started = SystemClock.elapsedRealtime()
+        try {
+            val reply = callWithRetry(
+                settings = settings,
+                task = AiTask.CHAT,
+                userPrompt = "Reply with the single word: OK",
+                systemPrompt = "You are a connectivity probe. Answer with OK only.",
+                imageBase64 = null,
+                jsonMode = false
+            )
+            AiProbeResult(
+                ok = true,
+                message = "Spojení funguje. ${reply.provider.name} · ${reply.model}",
+                latencyMs = SystemClock.elapsedRealtime() - started,
+                model = reply.model
+            )
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            AiProbeResult(ok = false, message = RetryPolicy.userMessage(error))
+        }
+    }
+
+    /**
+     * Asks for the analysis and repairs a broken JSON contract by sending the
+     * model its own output plus a strict reminder. This is the useful part of the
+     * Panus/Hermes self-healing loop, applied to a JSON schema instead of
+     * executing Python code on the device.
+     */
+    private suspend fun callAnalysisWithRepair(
+        settings: AiSettings,
+        task: AiTask,
+        marking: String,
+        imageBase64: String?
+    ): RepairOutcome {
+        var reply = callWithRetry(
+            settings = settings,
+            task = task,
+            userPrompt = buildScanPrompt(marking),
+            imageBase64 = imageBase64,
+            jsonMode = true
+        )
+        var tokens = reply.totalTokens
+        var json = AiWire.extractJsonObject(reply.text)
+        var repairs = 0
+
+        while (!isUsableAnalysis(json) && repairs < MAX_JSON_REPAIRS) {
+            repairs++
+            val brokenAnswer = reply.text.take(MAX_REPAIR_INPUT_CHARS)
+            reply = callWithRetry(
+                settings = settings,
+                task = task,
+                systemPrompt = REPAIR_SYSTEM_PROMPT,
+                userPrompt = buildRepairPrompt(marking, brokenAnswer),
+                imageBase64 = null,
+                jsonMode = true
+            )
+            tokens += reply.totalTokens
+            json = AiWire.extractJsonObject(reply.text)
+        }
+
+        val usable = json?.takeIf { isUsableAnalysis(it) }
+            ?: throw AiProtocolException(
+                "Model nevrátil použitelný JSON ani po $repairs opravných pokusech."
+            )
+
+        if (repairs > 0) {
+            logHealing(
+                actionName = "Self-repair JSON kontraktu",
+                errorDetails = "První odpověď nebyla platný JSON s componentName (opravné pokusy: $repairs).",
+                healingStrategy = "Model dostal vlastní výstup a striktní schéma a musel odpověď opravit. " +
+                    "Žádná náhradní demo analýza se nepoužívá.",
                 isResolved = true
             )
-            _healingLogs.update { listOf(healLog) + it.take(25) }
-            _telemetry.update {
-                it.copy(
-                    failedRequests = it.failedRequests + 1,
-                    healedRequests = it.healedRequests + 1,
-                    activeProvider = LiteLlmProvider.AIR_GAPPED_FALLBACK
-                )
-            }
-
-            if (networkMode == NetworkMode.CLOUD_ONLY) {
-                throw lastException ?: IOException("Cloud AI Gateway failed after retries")
-            }
         }
 
-        // Local Heuristic Fallback Engine with honest "DEMO" labeling
-        val localResult = executeLocalEdgeHeuristic(queryOrMarking)
-        val latency = SystemClock.elapsedRealtime() - startTime
-        _telemetry.update {
-            it.copy(
-                successfulRequests = it.successfulRequests + 1,
-                totalTokens = it.totalTokens + 150,
-                lastLatencyMs = latency,
-                activeProvider = LiteLlmProvider.AIR_GAPPED_FALLBACK
+        return RepairOutcome(reply = reply, json = usable, totalTokens = tokens)
+    }
+
+    private fun isUsableAnalysis(json: JSONObject?): Boolean =
+        json != null && json.optString("componentName").isNotBlank()
+
+    private suspend fun callWithRetry(
+        settings: AiSettings,
+        task: AiTask,
+        userPrompt: String,
+        systemPrompt: String? = null,
+        imageBase64: String? = null,
+        jsonMode: Boolean
+    ): AiChatReply {
+        val model = ModelRouter.modelFor(settings, task)
+        var lastError: Throwable? = null
+
+        for (attempt in 0 until RetryPolicy.MAX_ATTEMPTS) {
+            try {
+                return callOnce(settings, model, systemPrompt, userPrompt, imageBase64, jsonMode)
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                lastError = error
+                if (!RetryPolicy.isRetryable(error) || attempt == RetryPolicy.MAX_ATTEMPTS - 1) {
+                    throw error
+                }
+                delay(RetryPolicy.backoffMs(attempt))
+            }
+        }
+        throw lastError ?: IOException("AI call failed without an error")
+    }
+
+    private fun callOnce(
+        settings: AiSettings,
+        model: String,
+        systemPrompt: String?,
+        userPrompt: String,
+        imageBase64: String?,
+        jsonMode: Boolean
+    ): AiChatReply {
+        val request = when (settings.provider) {
+            AiProvider.GEMINI -> buildGeminiRequest(settings, model, systemPrompt, userPrompt, imageBase64, jsonMode)
+            AiProvider.OPENAI_COMPATIBLE -> buildOpenAiRequest(settings, model, systemPrompt, userPrompt, imageBase64)
+        }
+
+        val started = SystemClock.elapsedRealtime()
+        client.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw AiHttpException(response.code, errorMessage(raw, response.message))
+            }
+            val json = runCatching { JSONObject(raw) }
+                .getOrElse { throw AiProtocolException("Odpověď není platný JSON.") }
+
+            val text = when (settings.provider) {
+                AiProvider.GEMINI -> AiWire.extractTextFromGemini(json)
+                AiProvider.OPENAI_COMPATIBLE -> AiWire.extractTextFromOpenAi(json)
+            }
+            val tokens = when (settings.provider) {
+                AiProvider.GEMINI -> AiWire.totalTokensFromGemini(json)
+                AiProvider.OPENAI_COMPATIBLE -> AiWire.totalTokensFromOpenAi(json)
+            }.let { if (it > 0) it else estimateTokens(userPrompt, text) }
+
+            return AiChatReply(
+                text = text,
+                model = model,
+                provider = settings.provider,
+                latencyMs = SystemClock.elapsedRealtime() - started,
+                totalTokens = tokens
             )
         }
-        return@withContext localResult.copy(
-            gatewayProviderUsed = LiteLlmProvider.AIR_GAPPED_FALLBACK,
-            latencyMs = latency
+    }
+
+    private fun buildGeminiRequest(
+        settings: AiSettings,
+        model: String,
+        systemPrompt: String?,
+        userPrompt: String,
+        imageBase64: String?,
+        jsonMode: Boolean
+    ): Request {
+        val body = AiWire.buildGeminiBody(
+            prompt = userPrompt,
+            systemPrompt = systemPrompt,
+            imageBase64 = imageBase64,
+            jsonMode = jsonMode
+        )
+        return Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+            .header("x-goog-api-key", settings.apiKey)
+            .header("User-Agent", USER_AGENT)
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+    }
+
+    private fun buildOpenAiRequest(
+        settings: AiSettings,
+        model: String,
+        systemPrompt: String?,
+        userPrompt: String,
+        imageBase64: String?
+    ): Request {
+        val base = settings.effectiveBaseUrl.trimEnd('/')
+        val url = if (base.endsWith("/chat/completions")) base else "$base/chat/completions"
+        val body = AiWire.buildOpenAiBody(
+            model = model,
+            userPrompt = userPrompt,
+            systemPrompt = systemPrompt,
+            imageBase64 = imageBase64
+        )
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+        if (settings.apiKey.isNotBlank()) {
+            builder.header("Authorization", "Bearer ${settings.apiKey}")
+        }
+        return builder.build()
+    }
+
+    private fun parseAnalysis(
+        data: JSONObject,
+        marking: String,
+        settings: AiSettings,
+        latency: Long,
+        tokens: Int
+    ): HackerCoreAnalysis {
+        return HackerCoreAnalysis(
+            componentName = data.optString("componentName").ifBlank { marking.ifBlank { "UNKNOWN COMPONENT" } },
+            packageType = data.optString("packageType").ifBlank { "SMD / Discrete" },
+            estimatedOrigin = data.optString("estimatedOrigin").ifBlank { "Consumer E-Waste" },
+            conditionAssessment = data.optString("conditionAssessment").ifBlank { "Verify diode drops with a multimeter" },
+            hardwareAnalysis = data.optString("hardwareAnalysis").ifBlank { "Standard IC specifications" },
+            rfAnalysis = data.optString("rfAnalysis").ifBlank { "Unknown passband" },
+            secOpsAnalysis = data.optString("secOpsAnalysis").ifBlank { "Check for exposed debug headers" },
+            firmwareAnalysis = data.optString("firmwareAnalysis").ifBlank { "No programming interface documented" },
+            selfCritiqueReflections = AiWire.stringList(data, "selfCritiqueReflections"),
+            osintGoogleDorks = AiWire.stringList(data, "osintGoogleDorks"),
+            topEdcMatches = AiWire.stringList(data, "topEdcMatches"),
+            verificationConfidence = data.optDouble("confidence", 0.9)
+                .toFloat().coerceIn(0.1f, 0.99f),
+            gatewayProviderUsed = providerKind(settings),
+            tokenUsageEstimate = tokens,
+            latencyMs = latency,
+            reflectionNotes = data.optString("reflectionNotes")
+                .ifBlank { "Pass 1 identification merged with Pass 2 self-reflection" }
         )
     }
 
-    private fun callCloudGatewayDualPass(
-        apiKey: String,
-        marking: String,
-        base64Image: String?
-    ): HackerCoreAnalysis {
-        // Dual-pass reflection prompt: Pass 1 (Identification) + Pass 2 (Self-reflection critique on traps)
-        val prompt = """
-        You are ScrapMaster AI running via the unified AI Gateway All-in-One v6.0.
-        Analyze this component marking or image: "$marking".
-        Execute a DUAL-PASS analysis with auto-correction reflection loop:
-        - PASS 1: Identify chip, package, pin count, functional category, and probable salvage source.
-        - PASS 2 (Self-reflection): Critically audit your own pass 1 findings: What could be overlooked? (SMD code collisions, counterfeit clones, reverse voltage traps, thermal pad necessities, bootstrap pin constraints).
-        - MERGE: Synthesize both passes into a verified hardware result.
+    private fun recordSuccess(reply: AiChatReply, settings: AiSettings) {
+        _telemetry.update {
+            it.copy(
+                successfulRequests = it.successfulRequests + 1,
+                totalTokens = it.totalTokens + reply.totalTokens,
+                lastLatencyMs = reply.latencyMs,
+                activeProvider = providerKind(settings),
+                activeModel = reply.model,
+                consecutiveFailures = 0
+            )
+        }
+    }
 
-        Return strictly a valid JSON object:
+    private fun recordFailure(error: Throwable) {
+        _telemetry.update {
+            it.copy(
+                failedRequests = it.failedRequests + 1,
+                consecutiveFailures = it.consecutiveFailures + 1
+            )
+        }
+        logHealing(
+            actionName = "AI volání selhalo",
+            errorDetails = error.localizedMessage ?: error.javaClass.simpleName,
+            healingStrategy = "Transport: ${RetryPolicy.MAX_ATTEMPTS} pokusy s backoffem pro 408/429/5xx/IO. " +
+                "Žádný falešný fallback – chyba se vrací uživateli.",
+            isResolved = false
+        )
+    }
+
+    private fun logHealing(
+        actionName: String,
+        errorDetails: String,
+        healingStrategy: String,
+        isResolved: Boolean
+    ) {
+        if (isResolved) {
+            _telemetry.update { it.copy(healedRequests = it.healedRequests + 1) }
+        }
+        val log = SelfHealingTraceLog(
+            id = UUID.randomUUID().toString(),
+            actionName = actionName,
+            errorDetails = errorDetails,
+            healingStrategy = healingStrategy,
+            isResolved = isResolved
+        )
+        _healingLogs.update { (listOf(log) + it).take(25) }
+    }
+
+    private fun providerKind(settings: AiSettings): LiteLlmProvider = when (settings.provider) {
+        AiProvider.GEMINI -> LiteLlmProvider.CLOUD_GATEWAY
+        AiProvider.OPENAI_COMPATIBLE -> LiteLlmProvider.OPENAI_COMPATIBLE
+    }
+
+    private fun errorMessage(rawBody: String, fallback: String): String {
+        val parsed = runCatching {
+            JSONObject(rawBody).optJSONObject("error")?.optString("message")
+        }.getOrNull()
+        return parsed?.takeIf { it.isNotBlank() }?.take(300) ?: fallback
+    }
+
+    private fun estimateTokens(prompt: String, answer: String): Int =
+        ((prompt.length + answer.length) / 4).coerceAtLeast(1)
+
+    private fun buildScanPrompt(marking: String): String = """
+        You are ScrapMaster AI running through a unified AI gateway.
+        Analyze this component marking or image: "$marking".
+
+        Execute a DUAL-PASS analysis:
+        - PASS 1: identify chip, package, pin count, functional category, salvage source.
+        - PASS 2: audit pass 1 for SMD code collisions, counterfeit clones, thermal
+          pad requirements, boot-strap traps and voltage limits.
+        - MERGE: synthesize both passes into one verified result.
+
+        Return strictly one JSON object, no prose and no markdown fences:
         {
           "componentName": "Exact chip name",
           "packageType": "e.g. SOP-8, QFN-32, Module",
@@ -156,203 +446,55 @@ class LiteLlmGateway(
           "conditionAssessment": "Inspection & diode test steps",
           "hardwareAnalysis": "Voltages, pinout highlights, limits",
           "rfAnalysis": "RF characteristics & emissions",
-          "secOpsAnalysis": "Hardware security, boot strapping, glitching",
+          "secOpsAnalysis": "Hardware security, boot strapping, glitching vectors",
           "firmwareAnalysis": "Flashing protocol & debug headers",
-          "selfCritiqueReflections": ["Pass 2 Critique 1", "Pass 2 Critique 2"],
+          "selfCritiqueReflections": ["Pass 2 critique 1", "Pass 2 critique 2"],
           "osintGoogleDorks": ["Dork 1", "Dork 2"],
-          "topEdcMatches": ["Top project 1", "Top project 2"],
-          "reflectionNotes": "Synthesis summary of Pass 1 and Pass 2 audit"
-        }
-        """.trimIndent()
-
-        val jsonBody = JSONObject().apply {
-            val contents = JSONArray()
-            val contentObj = JSONObject()
-            val parts = JSONArray()
-
-            parts.put(JSONObject().put("text", prompt))
-            if (!base64Image.isNullOrBlank()) {
-                val inlineData = JSONObject().apply {
-                    put("mimeType", "image/jpeg")
-                    put("data", base64Image)
-                }
-                parts.put(JSONObject().put("inlineData", inlineData))
-            }
-
-            contentObj.put("parts", parts)
-            contents.put(contentObj)
-            put("contents", contents)
-
-            val generationConfig = JSONObject().apply {
-                put("responseMimeType", "application/json")
-                put("temperature", 0.15)
-            }
-            put("generationConfig", generationConfig)
+          "topEdcMatches": ["Project 1", "Project 2"],
+          "reflectionNotes": "Synthesis of pass 1 and pass 2",
+          "confidence": 0.0
         }
 
-        val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey")
-            .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+        "componentName" is mandatory. Set "confidence" below 0.5 when the marking
+        is ambiguous. Never invent a datasheet pinout for an unknown code; state
+        the uncertainty instead. If nothing can be identified, use
+        "componentName": "UNKNOWN" and explain what to inspect next.
+    """.trimIndent()
+
+    private fun buildRepairPrompt(marking: String, previousAnswer: String): String = """
+        Your previous answer for the marking "$marking" did not satisfy the
+        required JSON contract, so it cannot be parsed.
+
+        Previous answer:
+        ---
+        $previousAnswer
+        ---
+
+        Return ONE valid JSON object only, with all keys from the contract and a
+        non-empty "componentName". No markdown fences, no commentary. Keep the
+        same analysis content; fix only the structure and any missing keys.
+    """.trimIndent()
+
+    private data class RepairOutcome(
+        val reply: AiChatReply,
+        val json: JSONObject,
+        val totalTokens: Int
+    )
+
+    companion object {
+        private const val USER_AGENT = "ScrapMaster-AI/1.3 (Android)"
+        private const val MAX_JSON_REPAIRS = 2
+        private const val MAX_REPAIR_INPUT_CHARS = 1_500
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        private const val REPAIR_SYSTEM_PROMPT =
+            "You repair malformed JSON answers. Output exactly one JSON object and nothing else."
+
+        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .build()
-
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            throw IOException("Gateway HTTP ${response.code}: ${response.message}")
-        }
-
-        val respStr = response.body?.string() ?: throw IOException("Empty Gateway response")
-        val rootJson = JSONObject(respStr)
-        val textResponse = rootJson
-            .getJSONArray("candidates")
-            .getJSONObject(0)
-            .getJSONObject("content")
-            .getJSONArray("parts")
-            .getJSONObject(0)
-            .getString("text")
-
-        val data = JSONObject(textResponse)
-
-        val selfCritique = mutableListOf<String>()
-        val scArray = data.optJSONArray("selfCritiqueReflections")
-        if (scArray != null) {
-            for (i in 0 until scArray.length()) selfCritique.add(scArray.getString(i))
-        }
-
-        val dorks = mutableListOf<String>()
-        val dorkArray = data.optJSONArray("osintGoogleDorks")
-        if (dorkArray != null) {
-            for (i in 0 until dorkArray.length()) dorks.add(dorkArray.getString(i))
-        }
-
-        val edc = mutableListOf<String>()
-        val edcArray = data.optJSONArray("topEdcMatches")
-        if (edcArray != null) {
-            for (i in 0 until edcArray.length()) edc.add(edcArray.getString(i))
-        }
-
-        return HackerCoreAnalysis(
-            componentName = data.optString("componentName", marking),
-            packageType = data.optString("packageType", "SMD / Discrete"),
-            estimatedOrigin = data.optString("estimatedOrigin", "Consumer E-Waste"),
-            conditionAssessment = data.optString("conditionAssessment", "Verify diode drops with multimeter"),
-            hardwareAnalysis = data.optString("hardwareAnalysis", "Standard IC specs extracted"),
-            rfAnalysis = data.optString("rfAnalysis", "Baseband / Low frequency emissions"),
-            secOpsAnalysis = data.optString("secOpsAnalysis", "Check for exposed UART debug headers"),
-            firmwareAnalysis = data.optString("firmwareAnalysis", "Standard ROM bootloader / SPI flash"),
-            selfCritiqueReflections = selfCritique,
-            osintGoogleDorks = dorks,
-            topEdcMatches = edc,
-            isDemoFallback = false,
-            verificationConfidence = 0.99f,
-            reflectionNotes = data.optString("reflectionNotes", "Fáze 1 & Fáze 2 reflexní syntéza ověřena.")
-        )
-    }
-
-    private fun executeLocalEdgeHeuristic(marking: String): HackerCoreAnalysis {
-        val q = marking.lowercase().trim()
-        return when {
-            q.contains("tp4056") || q.contains("4056") || q.contains("charger") -> {
-                HackerCoreAnalysis(
-                    componentName = "TP4056 1A Li-Ion Linear Battery Charger",
-                    packageType = "SOP-8 with Bottom Thermal Pad",
-                    estimatedOrigin = "Vapes, Portable Bluetooth Speakers, Power Banks, Drones",
-                    conditionAssessment = "Check resistance between pin 4 (VCC) and pin 5 (BAT). If < 100kΩ unpowered, internal FET is shorted.",
-                    hardwareAnalysis = "Vin 4.5V-5.5V, Vbat 4.2V ±1%, Programmable current via pin 2 (Rprog). 1.2kΩ = 1000mA, 2kΩ = 580mA, 10kΩ = 130mA.",
-                    rfAnalysis = "Pure linear regulator; 0dBm EMI. Excellent for noise-sensitive SDR receiver power supplies.",
-                    secOpsAnalysis = "Thermal runaway vector: counterfeit clone ICs lack over-temperature foldback.",
-                    firmwareAnalysis = "Analog state-machine IC; controlled via Pin 8 (CE Chip Enable).",
-                    selfCritiqueReflections = listOf(
-                        "Fáze 1 Identifikace: Ověřeno pouzdro SOP-8 a vývody PROG/BAT/CE.",
-                        "Fáze 2 Sebereflexe: Pozor na clone čipy bez spodního odvodu tepla a nezapojení baterie bez zátěže."
-                    ),
-                    osintGoogleDorks = listOf(
-                        "\"TP4056\" (\"NanJing Top Power\" | \"datasheet\") filetype:pdf",
-                        "\"TP4056\" schematic (Rprog | \"pin 2\") \"1A Li-Ion\""
-                    ),
-                    topEdcMatches = listOf(
-                        "#21 Pocket USB-C Fast Charger & 18650 Power Bank",
-                        "#1 LoRa Mesh Solar Field Repeater (Battery Subsystem)",
-                        "#28 High-CRI Workshop Inspection Penlight Power Supply"
-                    ),
-                    isDemoFallback = true,
-                    verificationConfidence = 0.98f,
-                    reflectionNotes = "[DEMO REŽIM] Lokální heuristické pravidlo (Cloud AI offline). Sebereflexe ověřena."
-                )
-            }
-            q.contains("esp32") || q.contains("wroom") -> {
-                HackerCoreAnalysis(
-                    componentName = "ESP32-WROOM-32D (Dual-Core Xtensa SoC)",
-                    packageType = "Castellated SMD Module (38-Pin)",
-                    estimatedOrigin = "Tuya Smart Plugs, Wi-Fi Lightbulbs, Sonoff Relays, Thermostats",
-                    conditionAssessment = "Power with regulated 3.3V (500mA). Monitor UART0 (TX pin 35, 115200 baud).",
-                    hardwareAnalysis = "240MHz dual-core 32-bit LX6, 520KB SRAM, 4MB SPI Flash, 802.11 b/g/n Wi-Fi + BLE 4.2.",
-                    rfAnalysis = "Operates 2412MHz-2484MHz. Onboard PCB trace inverted-F antenna (IFA). Keep ground clearance.",
-                    secOpsAnalysis = "Check if eFuses FLASH_CRYPT_CNT or SECURE_BOOT are blown. Dump flash via esptool.py.",
-                    firmwareAnalysis = "Hold GPIO0 LOW during reset to enter ROM bootloader for UART flashing.",
-                    selfCritiqueReflections = listOf(
-                        "Fáze 1 Identifikace: Detekován ESP32-D0WDQ6 čip.",
-                        "Fáze 2 Sebereflexe: GPIO12 nesmí být HIGH při bootu (zhroutí 3.3V flash rail) a GPIO34-39 jsou input-only!"
-                    ),
-                    osintGoogleDorks = listOf(
-                        "\"ESP32-WROOM-32D\" datasheet (\"boot strapping\" | \"schematic\") filetype:pdf",
-                        "site:espressif.com \"ESP32-WROOM-32\" hardware design guidelines filetype:pdf"
-                    ),
-                    topEdcMatches = listOf(
-                        "#2 Wi-Fi Wardriving & Deauther Dongle",
-                        "#1 LoRa Mesh Field Repeater (Gateway CPU)",
-                        "#5 Autonomous Solar Weather Telemetry Node"
-                    ),
-                    isDemoFallback = true,
-                    verificationConfidence = 0.99f,
-                    reflectionNotes = "[DEMO REŽIM] Lokální heuristické pravidlo (Cloud AI offline). Sebereflexe ověřena."
-                )
-            }
-            else -> {
-                HackerCoreAnalysis(
-                    componentName = if (marking.isNotBlank()) marking.uppercase() else "UNKNOWN SALVAGED COMPONENT",
-                    packageType = "Surface Mount (SMD) / Discrete",
-                    estimatedOrigin = "Consumer / Industrial E-Waste PCB",
-                    conditionAssessment = "Perform diode drop check across VCC and GND pins. Check for heat stress discoloration.",
-                    hardwareAnalysis = "Operating voltage estimated at standard 3.3V / 5.0V logic levels.",
-                    rfAnalysis = "Passband unknown. Maintain ground clearance in RF assemblies.",
-                    secOpsAnalysis = "Scan host PCB for exposed JTAG or SWD programming headers.",
-                    firmwareAnalysis = "Check OSINT dorks below for manufacturer register map and pinout.",
-                    selfCritiqueReflections = listOf(
-                        "Fáze 1 Identifikace: Nejednoznačné označení pouzdra.",
-                        "Fáze 2 Sebereflexe: Anti-halucinační zámek uzamčen. Nezaručujeme pinout bez staženého datasheetu."
-                    ),
-                    osintGoogleDorks = listOf(
-                        "\"${marking.ifBlank { "SMD" }}\" (datasheet | pinout | schematic) filetype:pdf",
-                        "\"${marking.ifBlank { "SMD" }}\" SMD code marking \"pin 1\" IC"
-                    ),
-                    topEdcMatches = listOf(
-                        "#27 Pocket Component Tester & ESR Meter",
-                        "#24 Continuous Low-Resistance Continuity Buzzer",
-                        "#25 USB Power Delivery (PD) Trigger Decoy"
-                    ),
-                    isDemoFallback = true,
-                    verificationConfidence = 0.95f,
-                    reflectionNotes = "[DEMO REŽIM] Neznámý potisk. Generován Google Dork pro bezpečné vyhledání."
-                )
-            }
-        }
-    }
-
-    fun triggerTestFailover() {
-        val testLog = SelfHealingTraceLog(
-            id = UUID.randomUUID().toString(),
-            actionName = "Simulated AI Gateway 429 Failover Test",
-            errorDetails = "Injected HTTP 429 Rate Limit on primary cloud endpoint",
-            healingStrategy = "Self-Healing Engine triggered: Switched route to Local Heuristic DEMO Engine with zero downtime",
-            isResolved = true
-        )
-        _healingLogs.update { listOf(testLog) + it.take(25) }
-        _telemetry.update {
-            it.copy(
-                failedRequests = it.failedRequests + 1,
-                healedRequests = it.healedRequests + 1,
-                activeProvider = LiteLlmProvider.AIR_GAPPED_FALLBACK
-            )
-        }
     }
 }

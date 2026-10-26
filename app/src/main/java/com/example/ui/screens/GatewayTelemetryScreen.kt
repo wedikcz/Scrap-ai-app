@@ -18,17 +18,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -65,6 +67,9 @@ fun GatewayTelemetryScreen(
 ) {
     val telemetry by viewModel.gatewayTelemetry.collectAsState()
     val healingLogs by viewModel.healingLogs.collectAsState()
+    val aiSettings by viewModel.aiSettings.collectAsState()
+    val isTestingAi by viewModel.isTestingAi.collectAsState()
+    val probe by viewModel.aiProbeResult.collectAsState()
 
     LazyColumn(
         modifier = modifier
@@ -108,35 +113,123 @@ fun GatewayTelemetryScreen(
                             text = telemetry.activeProvider.badge,
                             color = when (telemetry.activeProvider) {
                                 LiteLlmProvider.CLOUD_GATEWAY -> NeonCyan
+                                LiteLlmProvider.OPENAI_COMPATIBLE -> NeonCyan
                                 LiteLlmProvider.LOCAL_EDGE_NEURAL -> NeonEmerald
-                                LiteLlmProvider.AIR_GAPPED_FALLBACK -> NeonAmber
+                                LiteLlmProvider.UNCONFIGURED -> NeonRose
                             }
                         )
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Centrální směrovací brána pro multimodální LLM a vision dotazy s dynamickým load-balancingem, automatickým failoverem při 429/výpadku a zero-downtime samoopravným motorem.",
+                        text = "Centrální brána pro multimodální LLM: 3 pokusy s backoffem u 408/429/5xx, modelový self-repair neplatného JSON a reálná telemetrie. Žádný simulovaný failover ani náhradní demo výsledek.",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 16.sp
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    // Test Failover Button
                     Button(
-                        onClick = { viewModel.testGatewayFailover() },
+                        onClick = { viewModel.testAiConnection() },
+                        enabled = !isTestingAi,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("simulate_gateway_failover_btn"),
+                            .testTag("test_ai_connection_btn"),
                         shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = NeonRose.copy(alpha = 0.2f), contentColor = NeonRose),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, NeonRose)
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = DarkBase)
                     ) {
-                        Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
+                        if (isTestingAi) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = DarkBase, strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("TESTOVÁNÍ SPOJENÍ…", fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        } else {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "OTESTOVAT REÁLNÉ AI SPOJENÍ",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+
+                    if (probe != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (probe!!.ok) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (probe!!.ok) NeonEmerald else NeonRose,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = probe!!.message,
+                                color = if (probe!!.ok) NeonEmerald else NeonRose,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCard),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (aiSettings.isReady) NeonEmerald.copy(alpha = 0.5f) else NeonAmber.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Key, contentDescription = null, tint = NeonAmber, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "AI ENGINE",
+                                color = TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        StatusBadge(
+                            text = if (aiSettings.isReady) "FULL AI" else "AI OFF",
+                            color = if (aiSettings.isReady) NeonEmerald else NeonAmber
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = aiSettings.statusLabel(),
+                        color = if (aiSettings.isReady) NeonEmerald else NeonAmber,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Vision: ${aiSettings.effectiveVisionModel} · Chat: ${aiSettings.effectiveChatModel}",
+                        color = TextSecondary,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { viewModel.setRoute("/ai") },
+                        modifier = Modifier.fillMaxWidth().testTag("open_ai_settings_btn"),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = DarkBase)
+                    ) {
                         Text(
-                            text = "SIMULOVAT 429 & TESTOVAT SELF-HEALING FAILOVER",
+                            text = if (aiSettings.isReady) "ZOBRAZIT / UPRAVIT AI KONFIGURACI" else "AKTIVOVAT PLNÉ AI (VLOŽIT KLÍČ)",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
@@ -177,7 +270,7 @@ fun GatewayTelemetryScreen(
                 MetricTile(
                     title = "ÚSPĚŠNÉ DOTAZY",
                     value = "${telemetry.successfulRequests} / ${telemetry.totalRequests}",
-                    sub = "99.8% dostupnost",
+                    sub = if (telemetry.totalRequests == 0) "zatím žádná volání" else "${telemetry.availabilityPercent}% úspěšnost",
                     color = NeonEmerald,
                     modifier = Modifier.weight(1f)
                 )

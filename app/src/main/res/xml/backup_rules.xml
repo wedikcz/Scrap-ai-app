@@ -6,8 +6,7 @@
    See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- The AI settings hold a Keystore-sealed API key; the Keystore key never
+         leaves the device, so the ciphertext must not be backed up either. -->
+    <exclude domain="sharedpref" path="scrapmaster_ai.xml" />
 </full-backup-content>

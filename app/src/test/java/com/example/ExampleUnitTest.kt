@@ -134,29 +134,4 @@ class ExampleUnitTest {
             assertTrue("Hacker tip must be provided for ${item.name}", item.hackerTip.isNotBlank())
         }
     }
-
-    @Test
-    fun testIdentifiedComponentDataIntegrity() {
-        val component = com.example.ui.viewmodel.IdentifiedComponent(
-            partNumber = "NE555P",
-            commonName = "Precision Timer",
-            category = "ICs & Timing",
-            packageType = "DIP-8",
-            pinCount = 8,
-            pin1Location = "Top-Left notch",
-            voltageRange = "4.5V - 16.0V",
-            functionalSummary = "Precision timer",
-            salvageOrigin = "TV power board",
-            keyPinsSummary = listOf("Pin 1: GND", "Pin 8: VCC"),
-            safetyTestingTips = "Diode test between 1 and 8",
-            repurposeRecommendations = listOf("PWM Generator"),
-            isOfflineFallback = false
-        )
-
-        assertEquals("NE555P", component.partNumber)
-        assertEquals(8, component.pinCount)
-        assertEquals("DIP-8", component.packageType)
-        assertFalse(component.isOfflineFallback)
-        assertTrue(component.keyPinsSummary.isNotEmpty())
-    }
 }

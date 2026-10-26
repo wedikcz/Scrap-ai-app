@@ -43,6 +43,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import com.example.ui.components.CameraScannerDialog
 import com.example.util.CameraPermission
@@ -61,6 +62,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.NetworkMode
 import com.example.ui.components.HackerCoreBlock
 import com.example.ui.components.NetworkModeBadge
 import com.example.ui.components.StatusBadge
@@ -88,6 +90,8 @@ fun ScannerScreen(
     val analysis by viewModel.currentAnalysis.collectAsState()
     val scanError by viewModel.scanError.collectAsState()
     val netMode by viewModel.networkMode.collectAsState()
+    val aiSettings by viewModel.aiSettings.collectAsState()
+    val canScan = aiSettings.isReady && netMode != NetworkMode.LOCAL_AIRGAPPED
 
     var manualInput by remember { mutableStateOf("") }
     var selectedImageBase64 by remember { mutableStateOf<String?>(null) }
@@ -181,6 +185,74 @@ fun ScannerScreen(
                         fontSize = 12.sp,
                         lineHeight = 16.sp
                     )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        StatusBadge(
+                            text = if (canScan) "FULL AI" else "AI OFF",
+                            color = if (canScan) NeonEmerald else NeonAmber
+                        )
+                        TextButton(
+                            onClick = { viewModel.setRoute("/ai") },
+                            modifier = Modifier.testTag("scanner_ai_settings_btn")
+                        ) {
+                            Text(
+                                text = if (aiSettings.isReady) "AI: ${aiSettings.effectiveVisionModel}" else "Aktivovat plné AI",
+                                color = NeonCyan,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!canScan) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth().testTag("scanner_ai_gate"),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = NeonAmber.copy(alpha = 0.08f)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonAmber.copy(alpha = 0.7f))
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = NeonAmber, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "SKENER ČEKÁ NA PLNÉ AI",
+                                color = NeonAmber,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = if (netMode == NetworkMode.LOCAL_AIRGAPPED) {
+                                "Režim LOCAL_ONLY je určený pro offline RAG asistenta. Skenování součástek vyžaduje cloudový model – přepni režim sítě nebo se vrať k asistentovi."
+                            } else {
+                                "Bez API klíče se analýza nespustí. Aplikace záměrně nevrací náhradní demo výsledky – všechny údaje musí pocházet z reálného modelu."
+                            },
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { viewModel.setRoute("/ai") },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonAmber, contentColor = DarkBase),
+                            modifier = Modifier.testTag("scanner_activate_ai_btn")
+                        ) {
+                            Text("AKTIVOVAT PLNÉ AI", fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        }
+                    }
                 }
             }
         }
@@ -283,10 +355,12 @@ fun ScannerScreen(
 
                     Button(
                         onClick = {
-                            val query = manualInput.ifBlank { "TP4056" }
-                            viewModel.scanComponent(query, selectedImageBase64)
+                            val query = manualInput.trim()
+                            if (query.isNotBlank() || selectedImageBase64 != null) {
+                                viewModel.scanComponent(query, selectedImageBase64)
+                            }
                         },
-                        enabled = !isScanning,
+                        enabled = !isScanning && canScan,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("run_scan_button"),
@@ -363,7 +437,7 @@ fun ScannerScreen(
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(DarkSurface)
                                 .border(1.dp, DarkCardBorder, RoundedCornerShape(8.dp))
-                                .clickable {
+                                .clickable(enabled = canScan) {
                                     manualInput = preset
                                     viewModel.scanComponent(preset, null)
                                 }
@@ -371,7 +445,7 @@ fun ScannerScreen(
                         ) {
                             Text(
                                 text = preset,
-                                color = NeonCyan,
+                                color = if (canScan) NeonCyan else TextMuted,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace
                             )

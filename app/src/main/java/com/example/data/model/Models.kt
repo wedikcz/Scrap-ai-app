@@ -15,21 +15,27 @@ enum class NetworkMode(val labelCz: String, val labelEn: String, val badge: Stri
 }
 
 enum class LiteLlmProvider(val label: String, val badge: String) {
-    CLOUD_GATEWAY("Cloud AI Gateway (Convex/Gemini)", "CLOUD-GW"),
+    CLOUD_GATEWAY("Cloud AI Gateway (Gemini)", "CLOUD-GW"),
+    OPENAI_COMPATIBLE("OpenAI-compatible Gateway (Qwen / LiteLLM / Ollama)", "OPENAI-GW"),
     LOCAL_EDGE_NEURAL("Local Edge Neural Engine (aarch64)", "EDGE-NN"),
-    AIR_GAPPED_FALLBACK("Heuristic Rule Base (DEMO)", "DEMO-FALLBACK")
+    UNCONFIGURED("AI klíč není nastaven", "NO-KEY")
 }
 
 data class GatewayTelemetry(
-    val totalRequests: Int = 16,
-    val successfulRequests: Int = 15,
-    val failedRequests: Int = 1,
-    val healedRequests: Int = 1,
-    val totalTokens: Long = 6240L,
-    val lastLatencyMs: Long = 180L,
-    val activeProvider: LiteLlmProvider = LiteLlmProvider.CLOUD_GATEWAY,
-    val isAutoHealingActive: Boolean = true
-)
+    val totalRequests: Int = 0,
+    val successfulRequests: Int = 0,
+    val failedRequests: Int = 0,
+    val healedRequests: Int = 0,
+    val totalTokens: Long = 0L,
+    val lastLatencyMs: Long = 0L,
+    val activeProvider: LiteLlmProvider = LiteLlmProvider.UNCONFIGURED,
+    val isAutoHealingActive: Boolean = true,
+    val activeModel: String = "",
+    val consecutiveFailures: Int = 0
+) {
+    val availabilityPercent: Int
+        get() = if (totalRequests == 0) 0 else (successfulRequests * 100) / totalRequests
+}
 
 data class SelfHealingTraceLog(
     val id: String,
@@ -100,6 +106,15 @@ data class SalvageProject(
     val matrixIndex: Int = 0
 )
 
+@Entity(tableName = "ai_chat_messages")
+data class AiChatMessage(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sessionId: String = "default",
+    val role: String,
+    val content: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "rag_documents")
 data class RagDocument(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -133,7 +148,6 @@ data class HackerCoreAnalysis(
     val selfCritiqueReflections: List<String>,
     val osintGoogleDorks: List<String>,
     val topEdcMatches: List<String>,
-    val isDemoFallback: Boolean = false,
     val verificationConfidence: Float = 0.98f,
     val gatewayProviderUsed: LiteLlmProvider = LiteLlmProvider.CLOUD_GATEWAY,
     val tokenUsageEstimate: Int = 380,

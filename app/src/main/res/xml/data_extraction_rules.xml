@@ -5,10 +5,8 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <!-- Keystore-sealed API key: never leave the device. -->
+        <exclude domain="sharedpref" path="scrapmaster_ai.xml" />
     </cloud-backup>
     <!--
     <device-transfer>
